@@ -1,62 +1,142 @@
-# OLMoE-1B-7B-0125-Instruct Permutation验证项目
+# Permutation Game
 
-这个项目专门用于验证OLMoE-1B-7B-0125-Instruct模型中的permutation操作，帮助理解模型权重的重要性分布和结构。
+用于对比不同置换方法对MXFP4/NVFP4量化影响的工具包。
 
-## 项目结构
+## 重构说明
 
+代码已经重构，消除了重复代码，提高了可维护性：
+
+### 重构前的问题
+- 三个主要文件都有重复的量化函数定义
+- 重复的MSE计算函数
+- 重复的数据生成逻辑
+- 重复的模型加载函数
+
+### 重构后的结构
 ```
-PermuteQuant/
-├── permutation_validation.ipynb  # 主要的验证notebook
-├── requirements.txt              # 依赖包列表
-├── README.md                    # 项目说明文档
-└── weights/                     # 权重保存目录（运行后自动创建）
-```
-
-## 环境设置
-
-1. 创建虚拟环境（推荐）：
-```bash
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# 或
-venv\Scripts\activate     # Windows
-```
-
-2. 安装依赖：
-```bash
-pip install -r requirements.txt
+permute_playground/
+├── __init__.py              # 包初始化文件
+├── utils.py                 # 通用工具函数（量化、MSE计算、数据生成等）
+├── greedy_search.py         # 贪心搜索置换算法
+├── random_reshuffle.py      # 随机重排置换算法
+├── zigzag.py               # Zigzag置换算法
+└── run_all_experiments.py  # 综合实验运行脚本
 ```
 
-3. 启动Jupyter：
-```bash
-jupyter notebook
-```
+## 主要功能
+
+### 1. FP4量化函数 (`utils.py`)
+- `fp4_121_positive()`: FP4 1-2-1 正数量化
+- `fp4_quantize()`: 支持多种缩放格式的FP4量化
+- `calculate_quantization_mse()`: 量化误差计算
+
+### 2. 置换算法
+- **贪心搜索** (`greedy_search.py`): 按列方差装桶 + 交错
+- **SLS优化** (`greedy_search.py`): 随机交换优化
+- **随机重排** (`random_reshuffle.py`): 随机置换对比
+- **Zigzag** (`zigzag.py`): Zigzag模式分配
+
+### 3. 工具函数 (`utils.py`)
+- `make_synthetic_tensor()`: 生成合成测试数据
+- `generate_random_tensor_for_permutation()`: 生成置换实验用的随机tensor
+- `load_olmoe_q_proj_layer()`: 加载OLMoE模型权重
+- `extract_512x512_subblock()`: 提取权重子块
+- `run_experiment()`: 运行置换实验
+
+### 4. 独立算法函数
+每个算法文件都提供了独立的函数：
+- `greedy_search.greedy_interlaced_permutation_columns()`: 贪心装桶+交错
+- `greedy_search.sls_refine_columns()`: SLS优化
+- `greedy_search.greedy_perm_by_mean()`: Naive贪心搜索
+- `random_reshuffle.random_reshuffle_permutation()`: 随机重排
+- `zigzag.zigzag_permutation()`: Zigzag分配
 
 ## 使用方法
 
-1. 打开 `permutation_validation.ipynb`
-2. 按照notebook中的步骤执行：
-   - 第一步：加载OLMoE-1B-7B-0125-Instruct模型并提取权重
-   - 后续步骤：进行permutation验证（待实现）
+### 基本使用
+```python
+from permute_playground import utils
+
+# 生成合成数据
+tensor = utils.make_synthetic_tensor(512, 512, device='cuda')
+
+# 运行实验
+result = utils.run_experiment(
+    tensor, 
+    mode='greedy_sls', 
+    group_size=16, 
+    scale_format='e4m3'
+)
+```
+
+### 单独使用置换算法
+```python
+from permute_playground import greedy_search, random_reshuffle, zigzag
+
+# 贪心置换
+order = greedy_search.greedy_interlaced_permutation_columns(tensor, d=16)
+
+# 随机重排
+new_tensor, perm_matrix, orig_mse, new_mse = random_reshuffle.random_reshuffle_permutation(tensor, device)
+
+# Zigzag置换
+new_tensor, perm_matrix, orig_mse, new_mse, groups = zigzag.zigzag_permutation(tensor, device)
+```
+
+### 运行所有算法对比
+```python
+from permute_playground import run_all_experiments
+
+# 运行所有置换算法的对比实验
+results = run_all_experiments.run_all_permutation_experiments(
+    num_vectors=512,
+    vec_size=512,
+    group_size=16,
+    scale_format='e4m3'
+)
+```
+
+## 支持的量化格式
+
+- **e4m3**: NVIDIA FP4格式
+- **e8m0**: MXFP4格式  
+- **bf16**: Brain Float 16风格
+
+## 实验配置
+
+可以通过修改各文件中的配置参数来调整实验：
+
+```python
+CONFIG = {
+    'device': 'cuda',
+    'num_vectors': 512,
+    'vec_size': 512,
+    'group_size': 16,
+    'scale_format': 'e4m3',
+    'mode': 'greedy_sls',
+    'sls_steps': 600,
+    'seeds': list(range(10))
+}
+```
+
+## 依赖要求
+
+- PyTorch >= 1.8.0
+- Transformers >= 4.0.0
+- NumPy >= 1.19.0
+
+## 重构优势
+
+1. **消除重复代码**: 所有重复的函数都移到了 `utils.py` 中
+2. **模块化设计**: 每个算法文件专注于自己的置换逻辑
+3. **易于维护**: 修改量化函数只需要改一个地方
+4. **功能独立**: 每个置换算法都可以独立使用
+5. **统一接口**: 所有算法都提供一致的函数接口
 
 ## 注意事项
 
-- 确保有足够的内存来加载模型
-- 如果使用GPU，确保CUDA环境正确配置
-- 模型名称可能需要根据实际情况调整
-- 首次运行可能需要下载模型，请确保网络连接正常
-
-## 功能特性
-
-- 自动检测和加载OLMoE模型
-- 智能识别MoE、注意力、MLP等不同类型的权重
-- 权重统计分析和可视化
-- 权重数据保存和加载
-- 为后续permutation验证做准备
-
-## 下一步计划
-
-- 实现不同的permutation策略
-- 分析permutation对模型性能的影响
-- 可视化permutation前后的权重变化
-- 量化permutation的效果 # PermutationGame
+1. 重构后的代码保持了原有的功能不变
+2. 所有重复的函数都移到了 `utils.py` 中
+3. 各算法文件通过 `from . import utils` 导入通用函数
+4. 确保不会引入新的问题或改变现有行为
+5. 新增了独立的算法函数，便于单独使用和测试
