@@ -9,6 +9,7 @@ from . import utils
 from . import greedy_search
 from . import random_reshuffle
 from . import zigzag
+from . import fp4_grid_greedy
 
 def run_all_permutation_experiments(num_vectors=512, vec_size=512, group_size=16, scale_format='e4m3', seed=0):
     """
@@ -86,8 +87,19 @@ def run_all_permutation_experiments(num_vectors=512, vec_size=512, group_size=16
     print(f"   MSE差异: {zig_new_mse.item() - zig_orig_mse.item():.6f}")
     print()
     
-    # 4. 运行综合实验（使用utils中的run_experiment）
-    print("4. 运行综合实验（贪心+SLS优化）...")
+    # 4. 运行FP4-Grid Greedy Search实验
+    print("4. 运行FP4-Grid Greedy Search算法...")
+    fp4_result = fp4_grid_greedy.run_fp4_grid_experiment(
+        tensor, device, block_size=32, scale_format=scale_format, group_size=group_size
+    )
+    results['fp4_grid'] = fp4_result
+    print(f"   原始MSE: {fp4_result['original_mse']:.6f}")
+    print(f"   FP4-Grid MSE: {fp4_result['new_mse']:.6f}")
+    print(f"   MSE差异: {fp4_result['new_mse'] - fp4_result['original_mse']:.6f}")
+    print()
+    
+    # 5. 运行综合实验（使用utils中的run_experiment）
+    print("5. 运行综合实验（贪心+SLS优化）...")
     comprehensive_result = utils.run_experiment(
         tensor, 
         mode='greedy_sls', 
@@ -102,10 +114,10 @@ def run_all_permutation_experiments(num_vectors=512, vec_size=512, group_size=16
     print(f"   贪心+SLS MSE: {comprehensive_result['perm_mse']:.6f}")
     print()
     
-    # 5. 结果总结
+    # 6. 结果总结
     print("=" * 60)
     print("实验结果总结:")
-    print(f"{'算法':<15} {'原始MSE':<12} {'置换后MSE':<12} {'改善':<12}")
+    print(f"{'算法':<20} {'原始MSE':<12} {'置换后MSE':<12} {'改善':<12}")
     print("-" * 60)
     
     algorithms = [
@@ -113,12 +125,13 @@ def run_all_permutation_experiments(num_vectors=512, vec_size=512, group_size=16
         ('Naive贪心', results['greedy']['original_mse'], results['greedy']['naive_greedy_mse']),
         ('随机重排', results['random']['original_mse'], results['random']['new_mse']),
         ('Zigzag', results['zigzag']['original_mse'], results['zigzag']['new_mse']),
+        ('FP4-Grid', results['fp4_grid']['original_mse'], results['fp4_grid']['new_mse']),
         ('贪心+SLS', results['comprehensive']['base_mse'], results['comprehensive']['perm_mse'])
     ]
     
     for name, orig, new in algorithms:
         improvement = orig - new
-        print(f"{name:<15} {orig:<12.6f} {new:<12.6f} {improvement:<12.6f}")
+        print(f"{name:<20} {orig:<12.6f} {new:<12.6f} {improvement:<12.6f}")
     
     print("=" * 60)
     
