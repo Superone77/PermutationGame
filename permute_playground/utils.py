@@ -28,7 +28,8 @@ FP8_E4M3_MAX = 448.0
 def fp4_quantize(x: torch.Tensor, 
                  stochastic_rounding: bool = False, 
                  group_size: int = 16,
-                 scale_format: str = 'e4m3') -> torch.Tensor:
+                 scale_format: str = 'e4m3',
+                 e4m3_scale = 1) -> torch.Tensor:
     """FP4量化函数，支持多种缩放格式"""
     fp4_121_max = 6.0
     sign = x.sign()
@@ -38,6 +39,8 @@ def fp4_quantize(x: torch.Tensor,
     
     if scale_format == 'e8m0':
         scale = torch.pow(2.0, torch.floor(torch.log2(fp4_121_max / x_abs.max(dim=-1, keepdim=True)[0])))
+    if scale_format == 'e8m0_scale':
+        scale = torch.pow(2.0, torch.floor(torch.log2(fp4_121_max / x_abs.max(dim=-1, keepdim=True)[0])))/2
     elif scale_format == 'e4m3':
         nvfp4_max = fp4_121_max * FP8_E4M3_MAX
         scale_per_t = x_abs.max() / nvfp4_max
@@ -45,6 +48,7 @@ def fp4_quantize(x: torch.Tensor,
         
         scale_per_b = x_abs_scaled.max(dim=-1, keepdim=True)[0]
         input_tensor = fp4_121_max / scale_per_b
+        input_tensor = input_tensor/e4m3_scale
         down_cast = input_tensor.to(torch.float8_e4m3fn)
         up_cast = down_cast.to(scale_per_b.dtype)
         scale_per_b = up_cast
@@ -59,7 +63,8 @@ def fp4_quantize(x: torch.Tensor,
     scale = torch.where((0 < scale) * (scale < torch.inf), scale, 1.0)
     x_fp4_abs = fp4_121_positive(x_abs * scale, stochastic_rounding) / scale
     x_fp4_abs = x_fp4_abs.reshape(ori_shape)
-    return sign * x_fp4_abs
+    x_q = sign * x_fp4_abs
+    return x_q# + (x - x_q).detach()
 
 def calculate_quantization_mse(original: torch.Tensor, quantized: torch.Tensor) -> torch.Tensor:
     """计算原始张量和量化后张量之间的MSE"""
@@ -98,7 +103,7 @@ def generate_random_tensor_for_permutation(num_vectors=512, vec_size=512, device
 # 模型加载函数
 # =========================
 
-def load_olmoe_q_proj_layer(model_name="allenai/OLMoE-1B-7B-0125-Instruct", layer_idx=3):
+def load_olmoe_q_proj_layer(model_name="allenai/OLMoE-1B-7B-0125-Instruct", layer_idx=4):
     """加载OLMoE模型并提取指定层的q_proj权重"""
     try:
         print(f"正在加载模型: {model_name}")
@@ -122,24 +127,25 @@ def load_olmoe_q_proj_layer(model_name="allenai/OLMoE-1B-7B-0125-Instruct", laye
         print(f"加载模型时出错: {str(e)}")
         raise
 
-def extract_512x512_subblock(weight_matrix, start_row=0, start_col=0):
-    """从权重矩阵中提取512x512的子块"""
-    if weight_matrix.shape[0] < 512 or weight_matrix.shape[1] < 512:
-        raise ValueError(f"权重矩阵形状 {weight_matrix.shape} 小于512x512，无法提取子块")
+def extract_NxN_subblock(weight_matrix, start_row=0, start_col=0, sub_size = 512):
+    """从权重矩阵中提取NxN的子块"""
+    N = sub_size
+    if weight_matrix.shape[0] < N or weight_matrix.shape[1] < N:
+        raise ValueError(f"权重矩阵形状 {weight_matrix.shape} 小于NxN，无法提取子块")
     
-    end_row = min(start_row + 512, weight_matrix.shape[0])
-    end_col = min(start_row + 512, weight_matrix.shape[1])
+    end_row = min(start_row + N, weight_matrix.shape[0])
+    end_col = min(start_row + N, weight_matrix.shape[1])
     
-    if end_row - start_row < 512:
-        start_row = weight_matrix.shape[0] - 512
+    if end_row - start_row < N:
+        start_row = weight_matrix.shape[0] - N
         end_row = weight_matrix.shape[0]
     
-    if end_col - start_col < 512:
-        start_col = weight_matrix.shape[1] - 512
+    if end_col - start_col < N:
+        start_col = weight_matrix.shape[1] - N
         end_col = weight_matrix.shape[1]
     
     subblock = weight_matrix[start_row:end_row, start_col:end_col]
-    print(f"提取512x512子块，范围: 行[{start_row}:{end_row}], 列[{start_col}:{end_col}]")
+    print(f"提取NxN子块，范围: 行[{start_row}:{end_row}], 列[{start_col}:{end_col}]")
     return subblock
 
 # =========================
