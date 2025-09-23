@@ -8,7 +8,7 @@ torchrun --nnodes=1 --nproc_per_node=1 main.py \
   --device auto --dtype float16 \
   --scale-format e4m3 --block-size 16 \
   --reorder-method hybrid_plus --hybrid-top-pct 0.10 --interval-key center \
-  --partial-quant \
+  --partial-quant --partial-quant-pct 0.10 \
   --block-axis feature --viz
 
 python visualizer.py \

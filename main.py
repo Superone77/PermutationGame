@@ -28,6 +28,7 @@ def main():
     ap.add_argument('--interval-key', type=str, default='center', choices=['center','lexi'])
     ap.add_argument('--hybrid-top-pct', type=float, default=0.10)
     ap.add_argument('--partial-quant', action='store_true', default=False)
+    ap.add_argument('--partial-quant-pct', type=float, default=0.10, help='Percentage of channels to keep unquantized in partial quantization mode')
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--viz', action='store_true', default=True)
     ap.add_argument('--viz-dir', type=str, default=None)
@@ -84,7 +85,7 @@ def main():
         csv_dir=csv_dir, 
         save_csv=args.csv,
         partial_quant=args.partial_quant,
-        top_pct=args.hybrid_top_pct
+        top_pct=args.partial_quant_pct
     )
     
     if args.viz:
