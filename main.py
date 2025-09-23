@@ -24,7 +24,7 @@ def main():
     ap.add_argument('--scale-format', type=str, default='e4m3', choices=['e8m0', 'e4m3', 'ue5m3', 'bf16'])
     ap.add_argument('--block-size', type=int, default=16)
     ap.add_argument('--max-act-rows', type=int, default=32768)
-    ap.add_argument('--reorder-method', type=str, default='hybrid', choices=['hybrid','hybrid_plus','kmeans','interval','peg'])
+    ap.add_argument('--reorder-method', type=str, default='hybrid', choices=['hybrid','hybrid_plus','abs_hybrid_plus','kmeans','interval','peg'])
     ap.add_argument('--interval-key', type=str, default='center', choices=['center','lexi'])
     ap.add_argument('--hybrid-top-pct', type=float, default=0.10)
     ap.add_argument('--partial-quant', action='store_true', default=False)
