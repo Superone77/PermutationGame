@@ -22,7 +22,7 @@ def tensor_calc_reorder_index(xmax, xmin, n_clusters, n_heads=None):
     all_index = []
     all_counts = []
     for data in npdata:
-        kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=0).fit(data)
+        kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=0,max_iter=1000).fit(data)
         counts = np.bincount(kmeans.labels_)
         labels = torch.from_numpy(kmeans.labels_)
         index = torch.argsort(labels)
@@ -124,7 +124,7 @@ def balanced_kmeans2d_calc_reorder_index(xmax, xmin, n_clusters, block_size, n_h
             data_np = data_np[..., 0]
         D_head = data_np.shape[0]
         assert D_head == K * cap_size
-        km = KMeans(n_clusters=K, n_init=10, random_state=0).fit(data_np)
+        km = KMeans(n_clusters=K, n_init=10, random_state=0,max_iter=1000).fit(data_np)
         centers = torch.from_numpy(km.cluster_centers_.astype(np.float32))
         pts = torch.from_numpy(data_np.astype(np.float32))
         dists = torch.cdist(pts, centers, p=2)
@@ -267,10 +267,162 @@ def hybrid_plus_reorder_index(xmax: torch.Tensor, xmin: torch.Tensor, block_size
     return final_idx, counts
 
 
+def qk_proj_quadruple_reorder_index(q_xmax: torch.Tensor, q_xmin: torch.Tensor, k_xmax: torch.Tensor, k_xmin: torch.Tensor, block_size: int, top_pct: float = 0.10) -> Tuple[torch.Tensor, np.ndarray]:
+    q_xmx = q_xmax.view(-1).cpu()
+    q_xmn = q_xmin.view(-1).cpu()
+    k_xmx = k_xmax.view(-1).cpu()
+    k_xmn = k_xmin.view(-1).cpu()
+    
+    D = q_xmx.numel()
+    assert D == q_xmn.numel() == k_xmx.numel() == k_xmn.numel()
+    assert D % block_size == 0
+    K = D // block_size
+    
+    # 四元数特征：q_xmax, q_xmin, k_xmax, k_xmin
+    quadruple_features = torch.stack([q_xmx, q_xmn, k_xmx, k_xmn], dim=1)  # [D, 4]
+    
+    # 第一阶段：按四元数中绝对最大值排序
+    abs_max_quad = torch.max(torch.abs(quadruple_features), dim=1)[0]  # [D]
+    idx_abs_sorted = torch.argsort(abs_max_quad, descending=True, stable=True)
+    blocks = idx_abs_sorted.view(K, block_size)
+    
+    top_pct = float(max(0.0, min(0.5, top_pct)))
+    keep = int(round(K * top_pct))
+    
+    if keep == 0:
+        # 使用四元数进行K-means聚类
+        idx_mid, counts_mid = quadruple_kmeans_calc_reorder_index(quadruple_features, K, block_size)
+        return idx_mid.to(torch.long), counts_mid
+    
+    K_rem = K - 2 * keep
+    if K_rem <= 0:
+        return idx_abs_sorted.to(torch.long), np.full((K,), block_size)
+    
+    left_keep = blocks[:keep].reshape(-1)
+    right_keep = blocks[K - keep:].reshape(-1)
+    mid_idx = blocks[keep:K - keep].reshape(-1)
+    
+    # 对中间部分使用四元数K-means聚类
+    mid_quadruple = quadruple_features[mid_idx]
+    idx_mid_local, counts_mid = quadruple_kmeans_calc_reorder_index(mid_quadruple, K_rem, block_size)
+    mid_ordered = mid_idx[idx_mid_local]
+    
+    final_idx = torch.cat([left_keep, mid_ordered, right_keep], dim=0).to(torch.long)
+    counts = np.hstack([np.full((keep,), block_size), counts_mid, np.full((keep,), block_size)])
+    return final_idx, counts
+
+
+def quadruple_kmeans_calc_reorder_index(quadruple_features: torch.Tensor, n_clusters: int, block_size: int) -> Tuple[torch.Tensor, np.ndarray]:
+    """使用四元数特征进行K-means聚类"""
+    D, _ = quadruple_features.shape
+    assert D % block_size == 0
+    K = D // block_size
+    assert K == n_clusters
+    
+    data_np = quadruple_features.numpy()
+    
+    def _greedy_capacity_4d(data_np: np.ndarray, K: int, cap_size: int):
+        D_head = data_np.shape[0]
+        assert D_head == K * cap_size
+        km = KMeans(n_clusters=K, n_init=10, random_state=0).fit(data_np)
+        centers = torch.from_numpy(km.cluster_centers_.astype(np.float32))
+        pts = torch.from_numpy(data_np.astype(np.float32))
+        dists = torch.cdist(pts, centers, p=2)
+        prefs = torch.argsort(dists, dim=1).cpu().numpy()
+        if K >= 2:
+            d_sorted, _ = torch.sort(dists, dim=1)
+            margin = (d_sorted[:, 1] - d_sorted[:, 0]).cpu().numpy()
+        else:
+            margin = np.full((D_head,), np.inf)
+        order = np.argsort(-margin)
+        cap = np.full((K,), cap_size, dtype=np.int32)
+        assign = -np.ones((D_head,), dtype=np.int32)
+        for i in order:
+            for c in prefs[i]:
+                if cap[c] > 0:
+                    assign[i] = c
+                    cap[c] -= 1
+                    break
+        assert (assign >= 0).all() and cap.sum() == 0
+        return assign, centers, torch.cdist(pts, centers, p=2)
+    
+    used_lib = False
+    labels = None
+    centers_t = None
+    dists = None
+    
+    try:
+        from kmeans_pytorch import KMeans as TorchKMeans
+        device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
+        X = torch.from_numpy(data_np.astype(np.float32)).to(device)
+        kmp = TorchKMeans(n_clusters=K, device=device, balanced=True)
+        X = X.clamp(min=-1e6, max=1e6).nan_to_num(0.0)
+        _ = kmp.fit(X=X, distance='euclidean', iter_limit=100, tqdm_flag=False)
+        labels_t = kmp.predict(X=X)
+        centers_dev = kmp.cluster_centers
+        labels = labels_t.to('cpu', dtype=torch.long)
+        centers_t = centers_dev.to('cpu', dtype=torch.float32)
+        pts = torch.from_numpy(data_np.astype(np.float32))
+        dists = torch.cdist(pts, centers_t, p=2)
+        counts_chk = torch.bincount(labels, minlength=K).cpu().numpy()
+        used_lib = np.all(counts_chk == block_size)
+    except Exception:
+        used_lib = False
+    
+    if not used_lib:
+        assign_np, centers_t, dists = _greedy_capacity_4d(data_np, K, block_size)
+        labels = torch.from_numpy(assign_np)
+    
+    centers_center = centers_t.mean(dim=1)
+    cluster_order = torch.argsort(centers_center).cpu().numpy().tolist()
+    dnp = dists.cpu().numpy()
+    idx_list = []
+    counts = []
+    for k in cluster_order:
+        members = torch.nonzero(labels == k, as_tuple=False).view(-1).cpu().numpy()
+        members = members[np.argsort(dnp[members, k])]
+        idx_list.append(torch.from_numpy(members))
+        counts.append(len(members))
+    
+    all_index = torch.hstack(idx_list)
+    all_counts = np.hstack(counts)
+    return all_index, all_counts
+
+
 @torch.no_grad()
 def compute_reorders(oc_stats: Dict[str, Tuple[torch.Tensor, torch.Tensor]], block_size: int, method: str = 'peg', interval_key: str = 'center', acts_for_mse: Dict[str, torch.Tensor] | None = None, sls_iters: int = 20, sls_block_axis: str = 'feature', sls_scale_format: str = 'e4m3', hybrid_top_pct: float = 0.10) -> Dict[str, torch.Tensor]:
     perms: Dict[str, torch.Tensor] = {}
+    
+    # 特殊处理 q_proj 和 k_proj 的情况
+    q_proj_key = None
+    k_proj_key = None
+    
+    # 查找 q_proj 和 k_proj 的键
+    for name in oc_stats.keys():
+        if name.endswith('q_proj'):
+            q_proj_key = name
+        elif name.endswith('k_proj'):
+            k_proj_key = name
+    
+    # 如果找到了 q_proj 和 k_proj，使用四元数方法
+    if q_proj_key is not None and k_proj_key is not None:
+        q_xmax, q_xmin = oc_stats[q_proj_key]
+        k_xmax, k_xmin = oc_stats[k_proj_key]
+        
+        D = q_xmax.numel()
+        if D % block_size == 0 and q_xmax.numel() == k_xmax.numel():
+            print(f"Using quadruple reordering for {q_proj_key} and {k_proj_key}")
+            idx, counts = qk_proj_quadruple_reorder_index(q_xmax, q_xmin, k_xmax, k_xmin, block_size, top_pct=hybrid_top_pct)
+            if idx.numel() == D:
+                perms[q_proj_key] = idx.to(torch.long)
+                perms[k_proj_key] = idx.to(torch.long)  # 使用相同的重排序顺序
+    
+    # 处理其他模块
     for name, (xmax, xmin) in oc_stats.items():
+        # 跳过已经处理过的 q_proj 和 k_proj
+        if name == q_proj_key or name == k_proj_key:
+            continue
+            
         D = xmax.numel()
         if D % block_size != 0:
             continue
