@@ -22,7 +22,7 @@ def tensor_calc_reorder_index(xmax, xmin, n_clusters, n_heads=None):
     all_index = []
     all_counts = []
     for data in npdata:
-        kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=0,max_iter=1000).fit(data)
+        kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=0,init='k-means++',max_iter=1000).fit(data)
         counts = np.bincount(kmeans.labels_)
         labels = torch.from_numpy(kmeans.labels_)
         index = torch.argsort(labels)
@@ -125,12 +125,12 @@ def balanced_kmeans2d_calc_reorder_index(xmax, xmin, n_clusters, block_size, n_h
         D_head = data_np.shape[0]
         assert D_head == K * cap_size
         # 针对大量通道优化K-means参数
-        if D_head > 1000:
+        if 0:
             # 大量通道：使用K-means++初始化，增加迭代次数和初始化次数
             km = KMeans(n_clusters=K, n_init=20, random_state=0, init='k-means++', max_iter=500).fit(data_np)
         else:
             # 少量通道：使用默认参数
-            km = KMeans(n_clusters=K, n_init=10, random_state=0, max_iter=300).fit(data_np)
+            km = KMeans(n_clusters=K, n_init=10, random_state=0, init='k-means++',max_iter=1000).fit(data_np)
         centers = torch.from_numpy(km.cluster_centers_.astype(np.float32))
         pts = torch.from_numpy(data_np.astype(np.float32))
         dists = torch.cdist(pts, centers, p=2)
@@ -160,7 +160,7 @@ def balanced_kmeans2d_calc_reorder_index(xmax, xmin, n_clusters, block_size, n_h
         assert D_head == K * block_size
         
         # 数据预处理：标准化以提高聚类效果
-        if D_head > 1000:
+        if 0:
             data_mean = np.mean(data, axis=0)
             data_std = np.std(data, axis=0) + 1e-8
             data_normalized = (data - data_mean) / data_std
@@ -310,22 +310,16 @@ def abs_kmeans_calc_reorder_index(abs_max_values: torch.Tensor, n_clusters: int,
     
     data_np = abs_max_values.numpy().reshape(-1, 1)  # 转换为2D数组用于K-means
     
-    # 对大量通道进行标准化
-    if D > 1000:
-        data_mean = np.mean(data_np, axis=0)
-        data_std = np.std(data_np, axis=0) + 1e-8
-        data_np = (data_np - data_mean) / data_std
-        print(f"Applied normalization for abs_max features with {D} channels")
     
     def _greedy_capacity_1d(data_np: np.ndarray, K: int, cap_size: int):
         D_head = data_np.shape[0]
         assert D_head == K * cap_size
         
         # 针对1D特征优化K-means参数
-        if D_head > 1000:
+        if 0:
             km = KMeans(n_clusters=K, n_init=20, random_state=0, init='k-means++', max_iter=500)
         else:
-            km = KMeans(n_clusters=K, n_init=10, random_state=0, max_iter=300)
+            km = KMeans(n_clusters=K, n_init=10, random_state=0, init='k-means++',max_iter=1000)
         
         km.fit(data_np)
         centers = torch.from_numpy(km.cluster_centers_.astype(np.float32))
@@ -436,7 +430,7 @@ def dual_kmeans_calc_reorder_index(dual_features: torch.Tensor, n_clusters: int,
     data_np = dual_features.numpy()
     
     # 对大量通道进行标准化
-    if D > 1000:
+    if 0:
         data_mean = np.mean(data_np, axis=0)
         data_std = np.std(data_np, axis=0) + 1e-8
         data_np = (data_np - data_mean) / data_std
@@ -447,10 +441,10 @@ def dual_kmeans_calc_reorder_index(dual_features: torch.Tensor, n_clusters: int,
         assert D_head == K * cap_size
         
         # 针对2D特征优化K-means参数
-        if D_head > 1000:
+        if 0:
             km = KMeans(n_clusters=K, n_init=20, random_state=0, init='k-means++', max_iter=500)
         else:
-            km = KMeans(n_clusters=K, n_init=10, random_state=0, max_iter=300)
+            km = KMeans(n_clusters=K, n_init=10, random_state=0,init='k-means++', max_iter=1000)
         
         km.fit(data_np)
         centers = torch.from_numpy(km.cluster_centers_.astype(np.float32))
@@ -571,12 +565,12 @@ def quadruple_kmeans_calc_reorder_index(quadruple_features: torch.Tensor, n_clus
         D_head = data_np.shape[0]
         assert D_head == K * cap_size
         # 针对四元数特征优化K-means参数
-        if D_head > 1000:
+        if 0:
             # 大量通道：使用K-means++初始化，增加迭代次数
             km = KMeans(n_clusters=K, n_init=20, random_state=0, init='k-means++', max_iter=500).fit(data_np)
         else:
             # 少量通道：使用默认参数
-            km = KMeans(n_clusters=K, n_init=10, random_state=0, max_iter=300).fit(data_np)
+            km = KMeans(n_clusters=K, n_init=10, random_state=0, init='k-means++',max_iter=1000).fit(data_np)
         centers = torch.from_numpy(km.cluster_centers_.astype(np.float32))
         pts = torch.from_numpy(data_np.astype(np.float32))
         dists = torch.cdist(pts, centers, p=2)
