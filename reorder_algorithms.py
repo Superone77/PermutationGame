@@ -281,9 +281,21 @@ def qk_proj_quadruple_reorder_index(q_xmax: torch.Tensor, q_xmin: torch.Tensor, 
     # 四元数特征：q_xmax, q_xmin, k_xmax, k_xmin
     quadruple_features = torch.stack([q_xmx, q_xmn, k_xmx, k_xmn], dim=1)  # [D, 4]
     
-    # 第一阶段：按四元数中绝对最大值排序
-    abs_max_quad = torch.max(torch.abs(quadruple_features), dim=1)[0]  # [D]
-    idx_abs_sorted = torch.argsort(abs_max_quad, descending=True, stable=True)
+    # 第一阶段：交替排序策略
+    # 单数block按q的大小排序，双数block按k的大小排序
+    q_abs_max = torch.max(torch.abs(q_xmx), torch.abs(q_xmn))  # [D]
+    k_abs_max = torch.max(torch.abs(k_xmx), torch.abs(k_xmn))  # [D]
+    
+    # 创建交替排序的分数
+    alternating_scores = torch.zeros_like(q_abs_max)
+    for i in range(D):
+        block_idx = i // block_size
+        if block_idx % 2 == 0:  # 双数block (0, 2, 4, ...) 按k排序
+            alternating_scores[i] = k_abs_max[i]
+        else:  # 单数block (1, 3, 5, ...) 按q排序
+            alternating_scores[i] = q_abs_max[i]
+    
+    idx_abs_sorted = torch.argsort(alternating_scores, descending=True, stable=True)
     blocks = idx_abs_sorted.view(K, block_size)
     
     top_pct = float(max(0.0, min(0.5, top_pct)))
