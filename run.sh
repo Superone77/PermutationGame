@@ -7,7 +7,8 @@ torchrun --nnodes=1 --nproc_per_node=1 main.py \
   --seq-len 2048 --max-samples 32 --batch-size 1 \
   --device auto --dtype float16 \
   --scale-format e4m3 --block-size 16 \
-  --reorder-method hybrid --hybrid-top-pct 0.10 --interval-key center \
+  --reorder-method hybrid_plus --hybrid-top-pct 0.10 --interval-key center \
+  --partial-quant \
   --block-axis feature --viz
 
 python visualizer.py \
