@@ -3,7 +3,7 @@ import os
 import json
 import argparse
 import torch
-from model_utils import collect_block4_stats_and_samples, pick_device, str2dtype
+from model_utils import collect_block_stats_and_samples, pick_device, str2dtype
 from reorder_algorithms import compute_reorders
 from evaluation import evaluate_nvfp4_mse
 from utils import visualize_modules
@@ -29,6 +29,8 @@ def main():
     ap.add_argument('--hybrid-top-pct', type=float, default=0.10)
     ap.add_argument('--partial-quant', action='store_true', default=False)
     ap.add_argument('--partial-quant-pct', type=float, default=0.10, help='Percentage of channels to keep unquantized in partial quantization mode')
+    ap.add_argument('--eval-layers', type=str, default='all', choices=['all', 'single'], help='Evaluate all layers or single layer')
+    ap.add_argument('--layer-idx', type=int, default=3, help='Layer index to evaluate when eval-layers=single')
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--viz', action='store_true', default=True)
     ap.add_argument('--viz-dir', type=str, default=None)
@@ -43,12 +45,14 @@ def main():
     
     torch.manual_seed(args.seed)
     os.makedirs(args.cache_dir, exist_ok=True)
-    stats_path = os.path.join(args.cache_dir, 'llama31_8b_layer4_all_acts.pt')
-    perm_path = os.path.join(args.cache_dir, f'rptq_layer4_block{args.block_size}_perms.pt')
+    
+    layer_suffix = f"layer{args.layer_idx}" if args.eval_layers == 'single' else "all_layers"
+    stats_path = os.path.join(args.cache_dir, f'llama31_8b_{layer_suffix}_all_acts.pt')
+    perm_path = os.path.join(args.cache_dir, f'rptq_{layer_suffix}_block{args.block_size}_perms.pt')
     device = pick_device(args.device)
     dtype = str2dtype(args.dtype)
     
-    oc_stats, ic_stats, acts = collect_block4_stats_and_samples(
+    oc_stats, ic_stats, acts = collect_block_stats_and_samples(
         model_id=args.model_id, 
         cache_path=stats_path, 
         device=device, 
@@ -59,7 +63,9 @@ def main():
         dataset=args.dataset, 
         dataset_name=args.dataset_name, 
         split=args.split, 
-        max_act_rows=args.max_act_rows
+        max_act_rows=args.max_act_rows,
+        eval_layers=args.eval_layers,
+        layer_idx=args.layer_idx
     )
     
     perms = compute_reorders(
@@ -75,7 +81,7 @@ def main():
     )
     torch.save(perms, perm_path)
     
-    csv_dir = args.csv_dir or os.path.join(args.cache_dir, 'csv_layer4')
+    csv_dir = args.csv_dir or os.path.join(args.cache_dir, f'csv_{layer_suffix}')
     results = evaluate_nvfp4_mse(
         acts, 
         perms, 
@@ -89,7 +95,7 @@ def main():
     )
     
     if args.viz:
-        viz_dir = args.viz_dir or os.path.join(args.cache_dir, 'viz_layer4')
+        viz_dir = args.viz_dir or os.path.join(args.cache_dir, f'viz_{layer_suffix}')
         visualize_modules(
             acts, 
             perms, 

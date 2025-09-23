@@ -33,6 +33,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+import json
 
 # ------------------------------ IO helpers ------------------------------
 
@@ -208,6 +209,102 @@ def process_one_module(mod_name: str, mod_dir: str, out_dir: str, block_size: in
     return True
 
 
+def create_summary_plots(modules: List[str], csv_dir: str, out_dir: str, block_size: int):
+    """Create summary plots across all modules"""
+    all_mse_before = []
+    all_mse_after = []
+    all_improvements = []
+    module_info = []
+    
+    for mod in modules:
+        mod_dir = os.path.join(csv_dir, mod)
+        arrs = _load_module_arrays(mod_dir)
+        if arrs is None:
+            continue
+        
+        amin_b, amax_b, pos_a, orig_a, amin_a, amax_a, mse_b, mse_a = arrs
+        
+        if len(mse_b) > 0 and len(mse_a) > 0:
+            avg_mse_b = np.mean(mse_b)
+            avg_mse_a = np.mean(mse_a)
+            improvement = (avg_mse_b - avg_mse_a) / max(avg_mse_b, 1e-12) * 100
+            
+            all_mse_before.append(avg_mse_b)
+            all_mse_after.append(avg_mse_a)
+            all_improvements.append(improvement)
+            module_info.append(mod)
+    
+    if not all_mse_before:
+        return
+    
+    # Summary MSE comparison
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
+    
+    # MSE before vs after scatter
+    ax1.scatter(all_mse_before, all_mse_after, alpha=0.6, s=30)
+    lim = (0, max(max(all_mse_before), max(all_mse_after)))
+    ax1.plot(lim, lim, 'k--', alpha=0.5)
+    ax1.set_xlabel('MSE before')
+    ax1.set_ylabel('MSE after')
+    ax1.set_title('Module-wise MSE Comparison')
+    ax1.grid(True, alpha=0.3)
+    
+    # Improvement histogram
+    ax2.hist(all_improvements, bins=20, alpha=0.7, color='C2')
+    ax2.set_xlabel('Improvement (%)')
+    ax2.set_ylabel('Number of modules')
+    ax2.set_title('Improvement Distribution')
+    ax2.grid(True, alpha=0.3)
+    
+    plt.savefig(os.path.join(out_dir, 'summary_mse_comparison.png'), dpi=160)
+    plt.close(fig)
+    
+    # Layer-wise analysis if applicable
+    layer_stats = {}
+    for i, mod in enumerate(module_info):
+        if mod.startswith('layer_'):
+            layer_idx = mod.split('_')[1]
+            if layer_idx not in layer_stats:
+                layer_stats[layer_idx] = {'mse_before': [], 'mse_after': [], 'improvements': []}
+            layer_stats[layer_idx]['mse_before'].append(all_mse_before[i])
+            layer_stats[layer_idx]['mse_after'].append(all_mse_after[i])
+            layer_stats[layer_idx]['improvements'].append(all_improvements[i])
+    
+    if layer_stats:
+        # Layer-wise improvement plot
+        fig, ax = plt.subplots(figsize=(10, 6), constrained_layout=True)
+        layers = sorted(layer_stats.keys(), key=int)
+        layer_avg_improvements = [np.mean(layer_stats[layer]['improvements']) for layer in layers]
+        
+        bars = ax.bar(layers, layer_avg_improvements, alpha=0.7, color='C1')
+        ax.set_xlabel('Layer Index')
+        ax.set_ylabel('Average Improvement (%)')
+        ax.set_title('Layer-wise Average Improvement')
+        ax.grid(True, alpha=0.3)
+        
+        # Add value labels on bars
+        for bar, val in zip(bars, layer_avg_improvements):
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1, 
+                   f'{val:.1f}%', ha='center', va='bottom', fontsize=8)
+        
+        plt.savefig(os.path.join(out_dir, 'layer_wise_improvement.png'), dpi=160)
+        plt.close(fig)
+    
+    # Save summary statistics
+    summary_stats = {
+        'total_modules': len(module_info),
+        'avg_mse_before': float(np.mean(all_mse_before)),
+        'avg_mse_after': float(np.mean(all_mse_after)),
+        'avg_improvement': float(np.mean(all_improvements)),
+        'max_improvement': float(np.max(all_improvements)),
+        'min_improvement': float(np.min(all_improvements)),
+        'modules_with_improvement': int(np.sum(np.array(all_improvements) > 0))
+    }
+    
+    with open(os.path.join(out_dir, 'summary_stats.json'), 'w') as f:
+        json.dump(summary_stats, f, indent=2)
+
+
 def main():
     ap = argparse.ArgumentParser(description='Visualize RPTQ/NVFP4 CSV outputs')
     ap.add_argument('--csv-dir', type=str, required=True, help='directory that contains per-module CSV folders')
@@ -217,6 +314,9 @@ def main():
     ap.add_argument('--maxpoints', type=int, default=4096, help='sampling cap for large-D plots')
     ap.add_argument('--style', type=str, default='default', choices=['default','darkgrid','seaborn','ggplot'])
     ap.add_argument('--dpi', type=int, default=160)
+    ap.add_argument('--group-by-layer', action='store_true', default=False, help='Group modules by layer for better organization')
+    ap.add_argument('--max-modules', type=int, default=50, help='Maximum number of modules to process (for all-layers mode)')
+    ap.add_argument('--create-summary', action='store_true', default=False, help='Create summary plots across all modules')
     args = ap.parse_args()
 
     # Style
@@ -233,14 +333,51 @@ def main():
     modules = [d for d in os.listdir(args.csv_dir) if os.path.isdir(os.path.join(args.csv_dir, d))]
     modules.sort()
 
-    any_ok = False
-    for mod in modules:
-        ok = process_one_module(mod, os.path.join(args.csv_dir, mod), args.out_dir, args.block_size, args.topk, args.maxpoints)
-        any_ok = any_ok or ok
+    # Limit modules for all-layers mode
+    if len(modules) > args.max_modules:
+        print(f"Warning: Found {len(modules)} modules, limiting to {args.max_modules}")
+        modules = modules[:args.max_modules]
+
+    if args.group_by_layer:
+        # Group modules by layer
+        layer_groups = {}
+        for mod in modules:
+            if mod.startswith('layer_'):
+                layer_idx = mod.split('_')[1]
+                if layer_idx not in layer_groups:
+                    layer_groups[layer_idx] = []
+                layer_groups[layer_idx].append(mod)
+            else:
+                # Handle modules without layer prefix
+                if 'other' not in layer_groups:
+                    layer_groups['other'] = []
+                layer_groups['other'].append(mod)
+        
+        # Process each layer group
+        any_ok = False
+        for layer_idx, layer_modules in layer_groups.items():
+            layer_out_dir = os.path.join(args.out_dir, f'layer_{layer_idx}')
+            _maybe_mkdir(layer_out_dir)
+            
+            print(f"Processing layer {layer_idx} with {len(layer_modules)} modules...")
+            for mod in layer_modules:
+                ok = process_one_module(mod, os.path.join(args.csv_dir, mod), layer_out_dir, args.block_size, args.topk, args.maxpoints)
+                any_ok = any_ok or ok
+    else:
+        # Original processing without grouping
+        any_ok = False
+        for mod in modules:
+            ok = process_one_module(mod, os.path.join(args.csv_dir, mod), args.out_dir, args.block_size, args.topk, args.maxpoints)
+            any_ok = any_ok or ok
 
     if not any_ok:
         # no modules processed; create a sentinel empty file
         open(os.path.join(args.out_dir, 'EMPTY.txt'), 'w').close()
+    
+    # Create summary plots if requested
+    if args.create_summary and any_ok:
+        print("Creating summary plots...")
+        create_summary_plots(modules, args.csv_dir, args.out_dir, args.block_size)
 
 
 if __name__ == '__main__':

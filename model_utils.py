@@ -129,7 +129,7 @@ def build_wikitext_calib(tokenizer: AutoTokenizer, dataset: str, dataset_name: s
 
 
 @torch.no_grad()
-def collect_block4_stats_and_samples(model_id: str, cache_path: str, device: torch.device, dtype: torch.dtype, seq_len: int, max_samples: int, batch_size: int, dataset: str, dataset_name: str, split: str, max_act_rows: int) -> Tuple[Dict, Dict, Dict]:
+def collect_block_stats_and_samples(model_id: str, cache_path: str, device: torch.device, dtype: torch.dtype, seq_len: int, max_samples: int, batch_size: int, dataset: str, dataset_name: str, split: str, max_act_rows: int, eval_layers: str = 'single', layer_idx: int = 3) -> Tuple[Dict, Dict, Dict]:
     if os.path.exists(cache_path):
         pack = torch.load(cache_path, map_location='cpu')
         return pack['oc_stats'], pack['ic_stats'], pack['acts']
@@ -143,27 +143,49 @@ def collect_block4_stats_and_samples(model_id: str, cache_path: str, device: tor
         model.to(device)
     model.eval()
     inputs = build_wikitext_calib(tok, dataset, dataset_name, split, seq_len, max_samples)
-    layer_idx = 3
-    block = model.model.layers[layer_idx]
-    modules = iter_block_modules(block)
-    sampler = ActSampler(cap_rows=max_act_rows)
-    handles = []
-    for name, mod in modules.items():
-        mod.name = name
-        def combined_hook(m, i, o):
-            layer_omax_hook(m, i, o)
-            layer_i0max_hook(m, i, o)
-            sampler.hook(m, i, o)
-        handles.append(mod.register_forward_hook(combined_hook))
-    for i in range(0, len(inputs), batch_size):
-        batch_ids = inputs[i:i + batch_size]
-        max_len = max(x.numel() for x in batch_ids)
-        batch = torch.stack([torch.nn.functional.pad(x, (0, max_len - x.numel()), value=tok.pad_token_id) for x in batch_ids], dim=0).to(device)
-        _ = model(batch)
-    for h in handles:
-        h.remove()
-    oc_stats = {k: (v[0].cpu(), v[1].cpu()) for k, v in otc.items()}
-    ic_stats = {k: (v[0].cpu(), v[1].cpu()) for k, v in icc.items()}
-    acts = {k: v.cpu() for k, v in sampler.data.items()}
-    torch.save({'oc_stats': oc_stats, 'ic_stats': ic_stats, 'acts': acts}, cache_path)
-    return oc_stats, ic_stats, acts
+    
+    if eval_layers == 'all':
+        num_layers = len(model.model.layers)
+        layer_indices = list(range(num_layers))
+    else:
+        layer_indices = [layer_idx]
+    
+    all_oc_stats = {}
+    all_ic_stats = {}
+    all_acts = {}
+    
+    for current_layer_idx in layer_indices:
+        otc.clear(); icc.clear(); oc_dbg.clear()
+        block = model.model.layers[current_layer_idx]
+        modules = iter_block_modules(block)
+        sampler = ActSampler(cap_rows=max_act_rows)
+        handles = []
+        
+        for name, mod in modules.items():
+            layer_name = f"layer_{current_layer_idx}_{name}"
+            mod.name = layer_name
+            def combined_hook(m, i, o):
+                layer_omax_hook(m, i, o)
+                layer_i0max_hook(m, i, o)
+                sampler.hook(m, i, o)
+            handles.append(mod.register_forward_hook(combined_hook))
+        
+        for i in range(0, len(inputs), batch_size):
+            batch_ids = inputs[i:i + batch_size]
+            max_len = max(x.numel() for x in batch_ids)
+            batch = torch.stack([torch.nn.functional.pad(x, (0, max_len - x.numel()), value=tok.pad_token_id) for x in batch_ids], dim=0).to(device)
+            _ = model(batch)
+        
+        for h in handles:
+            h.remove()
+        
+        oc_stats = {k: (v[0].cpu(), v[1].cpu()) for k, v in otc.items()}
+        ic_stats = {k: (v[0].cpu(), v[1].cpu()) for k, v in icc.items()}
+        acts = {k: v.cpu() for k, v in sampler.data.items()}
+        
+        all_oc_stats.update(oc_stats)
+        all_ic_stats.update(ic_stats)
+        all_acts.update(acts)
+    
+    torch.save({'oc_stats': all_oc_stats, 'ic_stats': all_ic_stats, 'acts': all_acts}, cache_path)
+    return all_oc_stats, all_ic_stats, all_acts

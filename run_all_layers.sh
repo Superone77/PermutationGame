@@ -1,5 +1,8 @@
+#!/bin/bash
+
 export CUDA_VISIBLE_DEVICES="0"
 
+# Run evaluation on all layers
 torchrun --nnodes=1 --nproc_per_node=1 main.py \
   --model-id /local/mnt/workspace/wanqi/llama/LLM-Research/Meta-Llama-3.1-8B \
   --cache-dir ./cache \
@@ -9,11 +12,12 @@ torchrun --nnodes=1 --nproc_per_node=1 main.py \
   --scale-format e4m3 --block-size 16 \
   --reorder-method hybrid_plus --hybrid-top-pct 0.10 --interval-key center \
   --partial-quant --partial-quant-pct 0.10 \
-  --eval-layers single --layer-idx 3 \
+  --eval-layers all \
   --block-axis feature --viz
 
+# Visualize with layer grouping and summary
 python visualizer.py \
-  --csv-dir ./cache/csv_layer3 \
-  --out-dir ./cache/viz_from_csv \
+  --csv-dir ./cache/csv_all_layers \
+  --out-dir ./cache/viz_all_layers \
   --block-size 16 --topk 20 --maxpoints 4096 --style darkgrid \
-  --group-by-layer --create-summary
+  --group-by-layer --create-summary --max-modules 100
