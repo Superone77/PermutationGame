@@ -124,7 +124,13 @@ def balanced_kmeans2d_calc_reorder_index(xmax, xmin, n_clusters, block_size, n_h
             data_np = data_np[..., 0]
         D_head = data_np.shape[0]
         assert D_head == K * cap_size
-        km = KMeans(n_clusters=K, n_init=10, random_state=0,max_iter=1000).fit(data_np)
+        # 针对大量通道优化K-means参数
+        if D_head > 1000:
+            # 大量通道：使用K-means++初始化，增加迭代次数和初始化次数
+            km = KMeans(n_clusters=K, n_init=20, random_state=0, init='k-means++', max_iter=500).fit(data_np)
+        else:
+            # 少量通道：使用默认参数
+            km = KMeans(n_clusters=K, n_init=10, random_state=0, max_iter=300).fit(data_np)
         centers = torch.from_numpy(km.cluster_centers_.astype(np.float32))
         pts = torch.from_numpy(data_np.astype(np.float32))
         dists = torch.cdist(pts, centers, p=2)
@@ -152,30 +158,18 @@ def balanced_kmeans2d_calc_reorder_index(xmax, xmin, n_clusters, block_size, n_h
         D_head = data.shape[0]
         K = n_clusters
         assert D_head == K * block_size
-        used_lib = False
-        labels = None
-        centers_t = None
-        dists = None
-        try:
-            from kmeans_pytorch import KMeans as TorchKMeans
-            device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
-            X = torch.from_numpy(data.astype(np.float32)).to(device).view(-1, 2)
-            kmp = TorchKMeans(n_clusters=K, device=device, balanced=True)
-            X = X.clamp(min=-1e6, max=1e6).nan_to_num(0.0)
-            _ = kmp.fit(X=X, distance='euclidean', iter_limit=100, tqdm_flag=False)
-            labels_t = kmp.predict(X=X)
-            centers_dev = kmp.cluster_centers
-            labels = labels_t.to('cpu', dtype=torch.long)
-            centers_t = centers_dev.to('cpu', dtype=torch.float32)
-            pts = torch.from_numpy(data.astype(np.float32))
-            dists = torch.cdist(pts, centers_t, p=2)
-            counts_chk = torch.bincount(labels, minlength=K).cpu().numpy()
-            used_lib = np.all(counts_chk == block_size)
-        except Exception:
-            used_lib = False
-        if not used_lib:
-            assign_np, centers_t, dists = _greedy_capacity(data, K, block_size)
-            labels = torch.from_numpy(assign_np)
+        
+        # 数据预处理：标准化以提高聚类效果
+        if D_head > 1000:
+            data_mean = np.mean(data, axis=0)
+            data_std = np.std(data, axis=0) + 1e-8
+            data_normalized = (data - data_mean) / data_std
+            print(f"Applied data normalization for {D_head} channels")
+        else:
+            data_normalized = data
+        # 直接使用sklearn的KMeans
+        assign_np, centers_t, dists = _greedy_capacity(data_normalized, K, block_size)
+        labels = torch.from_numpy(assign_np)
         centers_center = centers_t.mean(dim=1)
         cluster_order = torch.argsort(centers_center).cpu().numpy().tolist()
         dnp = dists.cpu().numpy()
@@ -333,10 +327,23 @@ def quadruple_kmeans_calc_reorder_index(quadruple_features: torch.Tensor, n_clus
     
     data_np = quadruple_features.numpy()
     
+    # 对四元数特征进行标准化
+    if data_np.shape[0] > 1000:
+        data_mean = np.mean(data_np, axis=0)
+        data_std = np.std(data_np, axis=0) + 1e-8
+        data_np = (data_np - data_mean) / data_std
+        print(f"Applied normalization for quadruple features with {data_np.shape[0]} channels")
+    
     def _greedy_capacity_4d(data_np: np.ndarray, K: int, cap_size: int):
         D_head = data_np.shape[0]
         assert D_head == K * cap_size
-        km = KMeans(n_clusters=K, n_init=10, random_state=0).fit(data_np)
+        # 针对四元数特征优化K-means参数
+        if D_head > 1000:
+            # 大量通道：使用K-means++初始化，增加迭代次数
+            km = KMeans(n_clusters=K, n_init=20, random_state=0, init='k-means++', max_iter=500).fit(data_np)
+        else:
+            # 少量通道：使用默认参数
+            km = KMeans(n_clusters=K, n_init=10, random_state=0, max_iter=300).fit(data_np)
         centers = torch.from_numpy(km.cluster_centers_.astype(np.float32))
         pts = torch.from_numpy(data_np.astype(np.float32))
         dists = torch.cdist(pts, centers, p=2)
@@ -358,32 +365,9 @@ def quadruple_kmeans_calc_reorder_index(quadruple_features: torch.Tensor, n_clus
         assert (assign >= 0).all() and cap.sum() == 0
         return assign, centers, torch.cdist(pts, centers, p=2)
     
-    used_lib = False
-    labels = None
-    centers_t = None
-    dists = None
-    
-    try:
-        from kmeans_pytorch import KMeans as TorchKMeans
-        device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
-        X = torch.from_numpy(data_np.astype(np.float32)).to(device)
-        kmp = TorchKMeans(n_clusters=K, device=device, balanced=True)
-        X = X.clamp(min=-1e6, max=1e6).nan_to_num(0.0)
-        _ = kmp.fit(X=X, distance='euclidean', iter_limit=100, tqdm_flag=False)
-        labels_t = kmp.predict(X=X)
-        centers_dev = kmp.cluster_centers
-        labels = labels_t.to('cpu', dtype=torch.long)
-        centers_t = centers_dev.to('cpu', dtype=torch.float32)
-        pts = torch.from_numpy(data_np.astype(np.float32))
-        dists = torch.cdist(pts, centers_t, p=2)
-        counts_chk = torch.bincount(labels, minlength=K).cpu().numpy()
-        used_lib = np.all(counts_chk == block_size)
-    except Exception:
-        used_lib = False
-    
-    if not used_lib:
-        assign_np, centers_t, dists = _greedy_capacity_4d(data_np, K, block_size)
-        labels = torch.from_numpy(assign_np)
+    # 直接使用sklearn的KMeans
+    assign_np, centers_t, dists = _greedy_capacity_4d(data_np, K, block_size)
+    labels = torch.from_numpy(assign_np)
     
     centers_center = centers_t.mean(dim=1)
     cluster_order = torch.argsort(centers_center).cpu().numpy().tolist()
